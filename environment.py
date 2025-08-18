@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from tudatpy import constants, numerical_simulation
 from tudatpy.math import root_finders
 from tudatpy.numerical_simulation import environment_setup, propagation_setup
-from tudatpy.util import result2array
+from tudatpy.util import result2array, split_history
 from tudatpy.interface import spice
 
 import numpy as np
@@ -23,11 +23,9 @@ class Environment:
         spice.load_standard_kernels()
         body_settings = environment_setup.get_default_body_settings(['Earth', 'Sun', 'Moon'], 'Earth', 'J2000')
 
-        EARTH_GM = body_settings.get('Earth').gravity_field_settings.gravitational_parameter
-
         # Create satellite and secondary body(ies)
         bodies_to_propagate = []
-        system_initial_state = []
+        self.system_initial_state = []
 
         acceleration_settings = {}
         for body_name, body_params in environment_config['bodies_to_propagate'].items():
@@ -52,7 +50,7 @@ class Environment:
             }
 
             bodies_to_propagate.append(body_name)
-            system_initial_state.extend(body_params['X0'])
+            self.system_initial_state.extend(body_params['X0'])
 
         central_bodies = ['Earth'] * len(bodies_to_propagate)        # Define one central body per body to propagate
         bodies = environment_setup.create_system_of_bodies(body_settings) # Create environment
@@ -63,42 +61,16 @@ class Environment:
         )
         
         # CREATE PROPAGATION SETTINGS
-        # Create numerical integrator settings.
-        # step_size_control_settings = propagation_setup.integrator.step_size_control_custom_blockwise_scalar_tolerance(
-        #     block_indices_function=propagation_setup.integrator.standard_cartesian_state_element_blocks,
-        #     relative_error_tolerance=1e-12,
-        #     absolute_error_tolerance=1e-12,
-        # )
-
-        # step_size_validation_settings = propagation_setup.integrator.step_size_validation(
-        #     minimum_step=1e-3,
-        #     maximum_step=1000,
-        # )
-
-        # integrator_settings = propagation_setup.integrator.runge_kutta_variable_step(
-        #     initial_time_step=10, 
-        #     coefficient_set=propagation_setup.integrator.CoefficientSets.rkf_45,
-        #     step_size_control_settings=step_size_control_settings,
-        #     step_size_validation_settings=step_size_validation_settings,
-        # )
-
         integrator_settings = propagation_setup.integrator.runge_kutta_fixed_step(
             time_step=10,
             coefficient_set=propagation_setup.integrator.CoefficientSets.rkf_45,
         )
 
-        # Define relative state between bodies (for now only 2 objects)
-        dependent_variables_to_save = [
-            propagation_setup.dependent_variable.relative_distance('primary', 'debris1'),
-            propagation_setup.dependent_variable.relative_position('primary', 'debris1'),
-            propagation_setup.dependent_variable.relative_velocity('primary', 'debris1'),
-        ]
-
         # Define termination settings
         time_termination = propagation_setup.propagator.time_termination(self.tf)
 
         # relative_distance_termination = propagation_setup.propagator.dependent_variable_termination(
-        #     propagation_setup.dependent_variable.relative_distance('primary', 'debris1'),
+        #     propagation_setup.dependent_variable.relative_distance('primary', 'secondary'),
         #     limit_value=500,
         #     use_as_lower_limit=True,
         #     terminate_exactly_on_final_condition=True,
@@ -111,43 +83,117 @@ class Environment:
             fulfill_single_condition=True
         )
 
+        # Define relative state between bodies (for now only 2 objects)
+        dependent_variables_to_save = [
+            propagation_setup.dependent_variable.relative_distance('primary', 'secondary'),
+            # propagation_setup.dependent_variable.relative_position('primary', 'secondary'),
+            # propagation_setup.dependent_variable.relative_velocity('primary', 'secondary'),
+        ]
+
         # Create propagation settings.
-        propagator_settings = propagation_setup.propagator.translational(
+        propagator_settings = lambda system_initial_states: propagation_setup.propagator.translational(
             central_bodies,
             acceleration_models,
             bodies_to_propagate,
-            system_initial_state,
+            system_initial_states,
             self.ti,
             integrator_settings,
             termination_settings,
-            output_variables=dependent_variables_to_save,
+            output_variables=dependent_variables_to_save
         )
 
-        self.dynamics_simulator = numerical_simulation.create_dynamics_simulator(bodies, propagator_settings)
+        self.dynamics_simulator_function = lambda system_initial_states: numerical_simulation.create_dynamics_simulator(bodies, propagator_settings(system_initial_states))
 
+        # Propagate the system from the initial state
+        self.reset()
+
+
+    def get_state(self, epoch: float):
+        '''
+        Returns:
+          state: np.ndarray of shape (12,) representing the position and velocity of the primary body and its relative position and velocity from the secondary body.
+        '''
         # Extract numerical solution for states and dependent variables
-        propagation_results = self.dynamics_simulator.propagation_results
+        state = self.primary_history[epoch][:6]
+        state_relative = self.secondary_history[epoch][:6] - state
 
-        state_history = result2array(propagation_results.state_history)
-        self.tout = state_history[:, 0]
-        self.state_history = state_history[:, 1:]
+        return np.concatenate((state, state_relative))
 
-        self.dependent_variables = result2array(propagation_results.dependent_variable_history)[:, 1:]
 
-    def get_termination_details(self):
-        if self.tout[-1] == self.tf:
-            print('Time termination. NO COLLISION.')
+    def reset(self):
+        # Propagate the system from the initial state
+        dynamics_simulator = self.dynamics_simulator_function(self.system_initial_state)
 
-            miss_distance_idx = np.argmin(self.dependent_variables[:, 0])
-            print(f'Miss distance: {self.dependent_variables[miss_distance_idx, 0]} m')
-            print(f'TCA: {self.tout[miss_distance_idx]} s')
+        # Extract the state history of the primary and secondary bodies
+        propagation_results = dynamics_simulator.propagation_results
+        
+        self.primary_history = {}
+        self.secondary_history = {}
+        for epoch, system_state in propagation_results.state_history.items():
+            self.primary_history[epoch] = system_state[:6]
+            self.secondary_history[epoch] = system_state[6:]
 
+        # Reset training variables
+        self.current_epoch = self.ti
+        self.maneuver_done = False
+        self.done = False
+        self.current_state = self.get_state(self.current_epoch)
+
+        return self.current_state
+
+        
+    def step(self, action: np.ndarray, thrust_threshold: float = 0.1):
+        '''
+          action: np.ndarray of shape (3,) representing the impulsive maneuver in m/s. If norm(action) < threshold, interpret as no maneuver.
+        '''
+
+        COLLISION_THRESHOLD = 1e3  # meters
+
+        if self.maneuver_done:
+            raise Exception("Maneuver already performed. Reset environment.")
+        
+        # Check if action is below threshold
+        if np.linalg.norm(action) < thrust_threshold:
+            self.current_epoch += 10
+            if self.current_epoch >= self.tf:
+                self.done = True
+
+            return self.get_state(self.current_epoch), 0, self.done, {}
+        
+        # Perform the impulsive maneuver
+        self.maneuver_done = True
+
+        # Update the state of the primary body
+        pos = self.primary_history[self.current_epoch][:3]
+        vel = self.primary_history[self.current_epoch][3:]
+        vel += action
+
+        # Repropagate the orbit with the new initial conditions
+        system_state = np.concatenate((pos, vel, self.secondary_history[self.current_epoch]))
+        dynamics_simulator = self.dynamics_simulator_function(system_state)
+
+        # Compute miss distance
+        relative_distance = list(dynamics_simulator.propagation_results.dependent_variable_history.values())
+        miss_distance = min(relative_distance)
+
+        # Compute difference from original orbit
+        ...
+
+        # Reward logic
+        if miss_distance < COLLISION_THRESHOLD:
+            reward = -1000 # Penalize collision
         else:
-            print('Relative distance termination. COLLISION POSSIBLE.')
-            print(f'Miss distance: {self.dependent_variables[-1,0]} m')
-            print(f'TCA: {self.tout[-1]} s')
-        
-        
+            reward = 1000 - 10 * np.linalg.norm(action) # Penalize large delta-v
+            
+        self.done = True
+        return self.get_state(self.current_epoch), reward, self.done, {
+            'miss_distance': miss_distance,
+            'action': action,
+            'epoch': self.current_epoch
+        }
+
+
+
       
 
 
@@ -157,11 +203,10 @@ if __name__ == '__main__':
       config = yaml.safe_load(file)
 
     env = Environment(config['environment'])
-    env.get_termination_details()
 
     # PLOT TRAJECTORIES
-    pos_primary = env.state_history[:,0:3]
-    pos_secondary = env.state_history[:,6:9]
+    pos_primary = np.array(list(env.primary_history.values()))[:,0:3]
+    pos_secondary = np.array(list(env.secondary_history.values()))[:,0:3]
 
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_subplot(111, projection='3d')
@@ -185,10 +230,12 @@ if __name__ == '__main__':
     plt.close()
     
     # PLOT RELATIVE DISTANCE
-    rel_distance = env.dependent_variables[:,0]
+    time = np.array(list(env.primary_history.keys()))
+    rel_distance = np.linalg.norm(pos_primary - pos_secondary, axis=1)
+    print(min(rel_distance))
 
     fig, ax = plt.subplots(figsize=(10, 10))
-    ax.plot(env.tout, rel_distance / 1e3, label='Relative Distance')
+    ax.plot(time, rel_distance / 1e3, label='Relative Distance')
     ax.set_xlabel('Time [s]')
     ax.set_ylabel('Relative Distance [km]')
     ax.grid()
