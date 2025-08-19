@@ -1,13 +1,11 @@
 training:
-  GAMMA: 0.99
-  LR: 0.001
-  EPSILON_START: 1.0
-  EPSILON_END: 0.05
-  EPSILON_DECAY: 0.995
-  BATCH_SIZE: 64
-  MEMORY_SIZE: 10000
-  NUM_EPISODES: 500
-  MAX_STEPS: 500
+  total_timesteps: 1e+5
+  timesteps_per_episode: 500
+  timesteps_per_batch: 100
+  gamma: 0.95
+  updates_per_iteration: 5
+  lr_actor: 5e-3
+  lr_critic: 5e-3
 
 environment:
   initial_time: 0
