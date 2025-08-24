@@ -1,247 +1,268 @@
 import matplotlib.pyplot as plt
 
-from tudatpy import constants, numerical_simulation
-from tudatpy.math import root_finders
-from tudatpy.numerical_simulation import environment_setup, propagation_setup
-from tudatpy.util import result2array, split_history
-from tudatpy.interface import spice
+from gymnasium.spaces import Box
 
 import numpy as np
-import yaml
+import scipy
 
 from utils import *
 
+RANDOM_SEED = 42
+
+GM = 398600 # [km3/s2]
+NOMINAL_ORBIT = {
+    'sma': 6871,  # [km]
+    'ecc': 0.0001, # [-]
+    'aop': 0      # [rad]
+}
+
 class Environment:
-    def __init__(self, environment_config: dict):
-        N = len(environment_config['bodies_to_propagate'])
-
-        self.ti = environment_config.get('initial_time', 0)
-        self.tf = environment_config.get('final_time', 86400)
-
-        # CREATE ENVIRONMENT & ACCELERATION SETTINGS
-        # Create Earth
-        spice.load_standard_kernels()
-        body_settings = environment_setup.get_default_body_settings(['Earth', 'Sun', 'Moon'], 'Earth', 'J2000')
-
-        # Create satellite and secondary body(ies)
-        bodies_to_propagate = []
-        self.system_initial_state = []
-
-        acceleration_settings = {}
-        for body_name, body_params in environment_config['bodies_to_propagate'].items():
-            body_settings.add_empty_settings(body_name)
-
-            body_settings.get(body_name).constant_mass = body_params['mass']
-            area = body_params['area']
-
-            body_settings.get(body_name).aerodynamic_coefficient_settings = environment_setup.aerodynamic_coefficients.constant(
-                area, [body_params['Cd'], 0, 0]
-            )
-
-            body_settings.get(body_name).radiation_pressure_target_settings = environment_setup.radiation_pressure.cannonball_radiation_target(
-                area, body_params['Cr'], {'Sun': ['Earth']}
-            )
-
-            # Define accelerations on bodies (could make this flexible by passing a dict[str, list] from config)
-            acceleration_settings[body_name] = {
-                'Earth': [propagation_setup.acceleration.spherical_harmonic_gravity(8,8), propagation_setup.acceleration.aerodynamic()],
-                'Sun': [propagation_setup.acceleration.point_mass_gravity(), propagation_setup.acceleration.radiation_pressure()],
-                'Moon': [propagation_setup.acceleration.point_mass_gravity()]
-            }
-
-            bodies_to_propagate.append(body_name)
-            self.system_initial_state.extend(body_params['X0'])
-
-        central_bodies = ['Earth'] * len(bodies_to_propagate)        # Define one central body per body to propagate
-        bodies = environment_setup.create_system_of_bodies(body_settings) # Create environment
-
-        # Create acceleration models
-        acceleration_models = propagation_setup.create_acceleration_models(
-            bodies, acceleration_settings, bodies_to_propagate, central_bodies
-        )
+    def __init__(self, nominal_orbit: dict = NOMINAL_ORBIT, seed: int = RANDOM_SEED):
+        np.random.seed(RANDOM_SEED)
         
-        # CREATE PROPAGATION SETTINGS
-        integrator_settings = propagation_setup.integrator.runge_kutta_fixed_step(
-            time_step=10,
-            coefficient_set=propagation_setup.integrator.CoefficientSets.rkf_45,
-        )
+        self.observation_space = Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
+        self.action_space = Box(low=-0.01, high=0.01, shape=(2,), dtype=np.float32)
 
-        # Define termination settings
-        time_termination = propagation_setup.propagator.time_termination(self.tf)
+        self.nominal_orbit = nominal_orbit
 
-        # relative_distance_termination = propagation_setup.propagator.dependent_variable_termination(
-        #     propagation_setup.dependent_variable.relative_distance('primary', 'secondary'),
-        #     limit_value=500,
-        #     use_as_lower_limit=True,
-        #     terminate_exactly_on_final_condition=True,
-        #     termination_root_finder_settings=root_finders.bisection(1e-14, 1e-14)
-        # )
+    def _propagate_body_to_epoch(self, sma: float, ecc: float, th: float, delta_t: float):
+        n = np.sqrt(GM / sma ** 3)
         
-        termination_settings = propagation_setup.propagator.hybrid_termination(
-            # [time_termination, relative_distance_termination],
-            [time_termination],
-            fulfill_single_condition=True
-        )
+        E = 2 * np.arctan(np.sqrt((1 - ecc) / (1 + ecc)) * np.tan(th / 2))
+        M = E - ecc * np.sin(E)
+        M += n * delta_t
 
-        # Define relative state between bodies (for now only 2 objects)
-        dependent_variables_to_save = [
-            propagation_setup.dependent_variable.relative_distance('primary', 'secondary'),
-            # propagation_setup.dependent_variable.relative_position('primary', 'secondary'),
-            # propagation_setup.dependent_variable.relative_velocity('primary', 'secondary'),
-        ]
+        E = scipy.optimize.fsolve(lambda x: x - ecc * np.sin(x) - M, M)[0]
+        th = 2 * np.arctan(np.sqrt((1 + ecc) / (1 - ecc)) * np.tan(E / 2))
 
-        # Create propagation settings.
-        propagator_settings = lambda system_initial_states: propagation_setup.propagator.translational(
-            central_bodies,
-            acceleration_models,
-            bodies_to_propagate,
-            system_initial_states,
-            self.ti,
-            integrator_settings,
-            termination_settings,
-            output_variables=dependent_variables_to_save
-        )
+        return th
 
-        self.dynamics_simulator_function = lambda system_initial_states: numerical_simulation.create_dynamics_simulator(bodies, propagator_settings(system_initial_states))
+    def _propagate_system_to_epoch(self, sat_th: float, obj_th: float, delta_t: float):
+        ths = [sat_th, obj_th]
 
-        # Propagate the system from the initial state
-        self.reset()
+        for i, orbital_elements in enumerate([self.sat_elements, self.obj_elements]):
+            sma = orbital_elements['sma']
+            ecc = orbital_elements['ecc']
+
+            ths[i] = self._propagate_body_to_epoch(sma, ecc, ths[i], delta_t)
+
+        return ths
 
 
-    def get_state(self, epoch: float):
+    def _keplerian2cartesian(self, sma: float, ecc: float, aop: float, th: float):
+        p = sma * (1 - ecc ** 2)
+        
+        r = p / (1 + ecc * np.cos(th))
+        r_vec = r * np.array([[np.cos(th)], [np.sin(th)]])
+        r_vec = np.array([[np.cos(aop), -np.sin(aop)],
+                          [np.sin(aop),  np.cos(aop)]]) @ r_vec
+
+        v_vec = np.sqrt(GM / p) * np.array([[ecc * np.sin(th)], [1 + ecc * np.cos(th)]])
+        v_vec = np.array([[np.cos(aop + th), -np.sin(aop + th)],
+                          [np.sin(aop + th),  np.cos(aop + th)]]) @ v_vec
+
+        return r_vec.reshape(-1), v_vec.reshape(-1)
+
+    def _cartesian2keplerian(self, r_vec: np.ndarray, v_vec: np.ndarray):
+        r = np.linalg.norm(r_vec)
+        v = np.linalg.norm(v_vec)
+
+        # specific angular momentum
+        h = np.cross(r_vec, v_vec)
+
+        # eccentricity
+        ecc_vec = np.array([v_vec[1] * h, -h * v_vec[0]]) / GM - r_vec / r
+        ecc = np.linalg.norm(ecc_vec)
+
+        # semi-major axis
+        sma = (2 / r - v ** 2 / GM) ** -1
+
+        # argument of periapsis
+        aop = np.arctan2(ecc_vec[1], ecc_vec[0])
+
+        # true anomaly at TCA
+        th = np.arccos(np.dot(ecc_vec, r_vec) / (ecc * r))
+        if np.dot(r_vec, v_vec) < 0:
+            th = 2 * np.pi - th
+
+        return {'sma': sma, 'ecc': ecc, 'aop': aop, 'th': th} 
+
+
+    def get_observation(self):
         '''
         Returns:
-          state: np.ndarray of shape (12,) representing the position and velocity of the primary body and its relative position and velocity from the secondary body.
+          state: np.ndarray of shape (9,) representing the cartesian position and velocity of the satellite, its relative position and velocity from the debris body, and the cumulative delta-V.
         '''
-        # Extract numerical solution for states and dependent variables
-        state = self.primary_history[epoch][:6]
-        state_relative = self.secondary_history[epoch][:6] - state
+        
+        r_sat, v_sat = self._keplerian2cartesian(**self.sat_elements)
+        r_obj, v_obj = self._keplerian2cartesian(**self.obj_elements)
 
-        return np.concatenate((state, state_relative))
+        r_rel = r_obj - r_sat
+        v_rel = v_obj - v_sat
+
+        obs = np.hstack((r_sat, v_sat, r_rel, v_rel))
+        return np.append(obs, self.cumsum_deltaV)
 
 
     def reset(self):
-        # Propagate the system from the initial state
-        dynamics_simulator = self.dynamics_simulator_function(self.system_initial_state)
+        # generate random TCA
+        T = 2 * np.pi * np.sqrt(self.nominal_orbit['sma'] ** 3 / GM)
+        self.TCA = np.random.uniform(T / 2, 2 * T)
 
-        # Extract the state history of the primary and secondary bodies
-        propagation_results = dynamics_simulator.propagation_results
+        # compute true anomaly, cartesian position and velocity of the satellite at TCA
+        self.sat_th_TCA = np.random.uniform(0, 2 * np.pi)
+        sat_r_TCA, sat_v_TCA = self._keplerian2cartesian(**self.nominal_orbit, th=self.sat_th_TCA)
+
+        # generate debris position and velocity at TCA
+        r_offset = np.random.uniform(-1,1,(2,)) # (2,) [km]
+        v_offset = np.random.uniform(-1,1,(2,)) # (2,) [km/s]
+
+        obj_r_TCA = sat_r_TCA + r_offset # (2,)
+        obj_v_TCA = sat_v_TCA + v_offset # (2,)
+
+        r = np.linalg.norm(obj_r_TCA)
+        v = np.linalg.norm(obj_v_TCA)
+
+        # initialize satellite and debris orbital elements
+        self.sat_elements = self.nominal_orbit.copy()
+        self.obj_elements = self._cartesian2keplerian(obj_r_TCA, obj_v_TCA)
         
-        self.primary_history = {}
-        self.secondary_history = {}
-        for epoch, system_state in propagation_results.state_history.items():
-            self.primary_history[epoch] = system_state[:6]
-            self.secondary_history[epoch] = system_state[6:]
+        self.obj_th_TCA = self.obj_elements['th']
+
+        # propagate satellite and debris backward to initial epoch
+        ths = self._propagate_system_to_epoch(self.sat_th_TCA, self.obj_th_TCA, -self.TCA)
+        self.sat_elements['th'] = ths[0]
+        self.obj_elements['th'] = ths[1]
 
         # Reset training variables
-        self.current_epoch = self.ti
-        self.maneuver_done = False
+        self.cumsum_deltaV = 0
+        self.epoch = 0
         self.done = False
-        self.current_state = self.get_state(self.current_epoch)
 
-        return self.current_state
+        return self.get_observation()
 
         
-    def step(self, action: np.ndarray, thrust_threshold: float = 0.1):
+    def step(self, action: np.ndarray, time_step: float = 60):
         '''
-          action: np.ndarray of shape (3,) representing the impulsive maneuver in m/s. If norm(action) < threshold, interpret as no maneuver.
+          action: np.ndarray of shape (2,) representing the impulsive maneuver in km/s.
         '''
 
-        COLLISION_THRESHOLD = 1e3  # meters
+        action = np.clip(action, self.action_space.low, self.action_space.high)
 
-        if self.maneuver_done:
-            raise Exception("Maneuver already performed. Reset environment.")
-        
-        # Check if action is below threshold
-        if np.linalg.norm(action) < thrust_threshold:
-            self.current_epoch += 10
-            if self.current_epoch >= self.tf:
-                self.done = True
+        COLLISION_THRESHOLD = 1 # [km]
+        DELTAV_THRESHOLD = 0.02 # [km/s]
 
-            return self.get_state(self.current_epoch), 0, self.done, {}
-        
-        # Perform the impulsive maneuver
-        self.maneuver_done = True
+        reward = 0
 
-        # Update the state of the primary body
-        pos = self.primary_history[self.current_epoch][:3]
-        vel = self.primary_history[self.current_epoch][3:]
-        vel += action
+        # UPDATE SYSTEM
+        # Compute and store deltaV 
+        deltaV = np.linalg.norm(action)
+        self.cumsum_deltaV += deltaV
 
-        # Repropagate the orbit with the new initial conditions
-        system_state = np.concatenate((pos, vel, self.secondary_history[self.current_epoch]))
-        dynamics_simulator = self.dynamics_simulator_function(system_state)
+        # apply deltaV and recompute satellite's orbit
+        sat_r, sat_v = self._keplerian2cartesian(**self.sat_elements)
+        sat_v += action
 
-        # Compute miss distance
-        relative_distance = list(dynamics_simulator.propagation_results.dependent_variable_history.values())
-        miss_distance = min(relative_distance)
+        self.sat_elements = self._cartesian2keplerian(sat_r, sat_v)
 
-        # Compute difference from original orbit
-        ...
+        # propagate satellite and debris states one epoch forward
+        ths = self._propagate_system_to_epoch(self.sat_elements['th'], self.obj_elements['th'], time_step)
+        self.sat_elements['th'] = ths[0]
+        self.obj_elements['th'] = ths[1]
 
-        # Reward logic
-        if miss_distance < COLLISION_THRESHOLD:
-            reward = -1000 # Penalize collision
-        else:
-            reward = 1000 - 10 * np.linalg.norm(action) # Penalize large delta-v
-            
-        self.done = True
-        return self.get_state(self.current_epoch), reward, self.done, {
-            'miss_distance': miss_distance,
+        # get observation and update info
+        obs = self.get_observation()
+        self.epoch += time_step
+
+        info_dict = {
+            'termination reason': None,
+            'propagated distance': None,
+            'miss distance': None,
             'action': action,
-            'epoch': self.current_epoch
+            'cumulative deltaV': self.cumsum_deltaV,
+            'epoch': self.epoch
         }
 
+        # CHECK FUEL CONDITION
+        if self.cumsum_deltaV > DELTAV_THRESHOLD:
+            reward -= 1000 # large penalty for violating fuel constraint
+            self.done = True
 
+            info_dict['termination reason'] = 'DeltaV threshold violated'
+            return obs, reward, self.done, info_dict
 
-      
+        # CHECK COLLISION CONDITION
+        relative_distance = np.linalg.norm(obs[4:6])
+        if relative_distance < COLLISION_THRESHOLD:
+            # large penalty for collision
+            reward -= 1000 
+            self.done = True
 
+            info_dict['termination reason'] = 'Collision detected'
+            return obs, reward, self.done, info_dict
+
+        elif self.epoch > self.TCA and relative_distance > COLLISION_THRESHOLD:
+            # positive reward for missing the debris
+            reward += 100
+            self.done = True
+
+            info_dict['termination reason'] = 'CAM successful'
+            return obs, reward, self.done, info_dict
+
+        # MISS DISTANCE REWARD
+        # propagate the two orbits to TCA to compute miss distance
+        time_array = np.arange(self.epoch, self.TCA, time_step)
+        ths = [self.sat_elements['th'], self.obj_elements['th']]
+        
+        propagated_distance = np.zeros_like(time_array)
+        for i, t in enumerate(time_array):
+            ths = self._propagate_system_to_epoch(*ths, time_step)
+
+            sat_r, _ = self._keplerian2cartesian(self.sat_elements['sma'], self.sat_elements['ecc'], self.sat_elements['aop'], ths[0])
+            obj_r, _ = self._keplerian2cartesian(self.obj_elements['sma'], self.obj_elements['ecc'], self.obj_elements['aop'], ths[1])
+
+            propagated_distance[i] = np.linalg.norm(sat_r - obj_r)
+
+        miss_distance = np.min(propagated_distance)
+        info_dict['miss distance'] = miss_distance
+
+        # compute reward
+        if miss_distance < COLLISION_THRESHOLD:
+            reward -= 100 * (COLLISION_THRESHOLD - miss_distance)
+        else:
+            reward += 5 * (miss_distance / COLLISION_THRESHOLD)
+
+        # ORBIT DIVERGENCE REWARD
+        delta_sma = np.abs(self.sat_elements['sma'] - self.nominal_orbit['sma']) / self.nominal_orbit['sma']
+        delta_ecc = np.abs(self.sat_elements['ecc'] - self.nominal_orbit['ecc']) / (self.nominal_orbit['ecc'] + 1e-8)
+        delta_aop = np.abs((self.sat_elements['aop'] - self.nominal_orbit['aop']) % (2 * np.pi)) / (2 * np.pi)
+
+        reward -= delta_sma + delta_ecc + delta_aop
+
+        # DeltaV REWARD
+        reward -= 10 * deltaV 
+
+        return obs, reward, self.done, info_dict
 
 
 if __name__ == '__main__':
-    with open('config.yaml', 'r') as file:
-      config = yaml.safe_load(file)
+    env = Environment()
 
-    env = Environment(config['environment'])
+    for i in range(3):
+        obs = env.reset()
 
-    # PLOT TRAJECTORIES
-    pos_primary = np.array(list(env.primary_history.values()))[:,0:3]
-    pos_secondary = np.array(list(env.secondary_history.values()))[:,0:3]
+        print('TCA : ', env.TCA)
 
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.plot(*pos_primary.T / 1e3, label='Satellite')
-    ax.plot(*pos_secondary.T / 1e3, label='Debris')
+        plot_nominal_orbits(env, show=True)
 
-    ax.plot(*pos_primary[0] / 1e3, 'bx', label='Satellite Start')
-    ax.plot(*pos_secondary[0] / 1e3, 'rx', label='Debris Start')
+        action = np.random.uniform(-0.01,0.01,(2,))
+        _, reward, _, info = env.step(action)
 
-    ax.set_xlabel('X [km]')
-    ax.set_ylabel('Y [km]')
-    ax.set_zlabel('Z [km]')
-    ax.legend()
+        # print(info['termination reason'])
+        print('miss distance : ', info['miss distance'])
+        # print('delta V : ', info['action'])
+        # print('reward : ', reward)
 
-    plot_earth(ax)
-
-    rescale_plot(ax)
-    ax.set_box_aspect([1, 1, 1])  # Equal aspect ratio
-
-    fig.savefig('plots/trajectories.pdf')
-    plt.close()
-    
-    # PLOT RELATIVE DISTANCE
-    time = np.array(list(env.primary_history.keys()))
-    rel_distance = np.linalg.norm(pos_primary - pos_secondary, axis=1)
-    print(min(rel_distance))
-
-    fig, ax = plt.subplots(figsize=(10, 10))
-    ax.plot(time, rel_distance / 1e3, label='Relative Distance')
-    ax.set_xlabel('Time [s]')
-    ax.set_ylabel('Relative Distance [km]')
-    ax.grid()
-
-    fig.savefig('plots/rel_distance.pdf')
-    plt.close()
 
 # TODO:
 # - Add termination conditions if relative position is below a certain threshold

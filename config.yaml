@@ -1,27 +1,25 @@
-training:
-  total_timesteps: 1e+5
-  timesteps_per_episode: 500
-  timesteps_per_batch: 100
-  gamma: 0.95
-  updates_per_iteration: 5
-  lr_actor: 5e-3
-  lr_critic: 5e-3
+benchmark:
+  total_timesteps: 5.0e+6
+  timesteps_per_episode: 1000
+  timesteps_per_batch: 4000   # this one
+  save_frequency: 20000
+  standard_deviation: 0.5     # this one
+  discount_factor: 0.99       # this one
+  clip_ratio: 0.2
+  updates_per_iteration: 5    # this one
+  lr_actor: 0.0003            # this one
+  lr_critic: 0.001            # this one
 
-environment:
-  initial_time: 0
-  final_time: 5500
-
-  bodies_to_propagate:
-    primary: 
-      X0: [ 3.75944379e+05,  6.08137408e+06,  3.28340214e+06, -5.32161464e+03, -2.32172417e+03, 4.89152047e+03]
-      mass: 260.
-      area: 17.5
-      Cd: 2.2
-      Cr: 1.3
-
-    secondary: 
-      X0: [ 3.30312011e+06, -2.69542170e+06, -5.71365135e+06, -4.06029364e+03, -6.22037456e+03, 9.09217382e+02]
-      mass: 100.
-      area: 1.
-      Cd: 2.2
-      Cr: 1.3
+satellite:
+  sma: 6795000.0
+  ecc: 0.18
+  inc: 21.6413
+  argp: 21.0174
+  raan: 60
+  tran: 0.0
+  mass: 100.0
+  area: 1.0
+  reflection_idx: 2.0
+  angle_type: "DEGREE"
+  thruster_max_force: 0.0001
+  thruster_isp: 4000.0

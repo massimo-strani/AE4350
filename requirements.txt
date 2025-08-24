@@ -1,0 +1,8 @@
+orekit python wrapper via conda (install orekit data as well)
+gymnasium
+numpy
+matplotlib
+torch
+yaml
+os
+datetime

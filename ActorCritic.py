@@ -6,12 +6,12 @@ from torch.distributions import MultivariateNormal
 import numpy as np
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, device: torch.device = torch.device('cpu')):
+    def __init__(self, obs_dim: int, act_dim: int, std: float, device: torch.device = torch.device('cpu')):
         super(ActorCritic, self).__init__()
 
         # Standard deviation for the action distribution is fixed for simplicity
         # This can be made learnable or adaptive if needed
-        self.act_var = torch.full(size=(act_dim,), fill_value=0.5).to(device) # Variance for the action distribution
+        self.act_var = torch.full(size=(act_dim,), fill_value=std).to(device) # Variance for the action distribution
         self.act_mat = torch.diag(self.act_var).to(device)                    # Covariance matrix for the action distribution
 
         self.act_dim = act_dim
@@ -58,6 +58,6 @@ class ActorCritic(nn.Module):
         # query critic network for a value for each observation in the batch
         values = self.critic(batch_obs)
         logprobs = dist.log_prob(batch_acts)
-        # dist_entropy = dist.entropy()  # Optional: can be used for exploration bonus
+        dist_entropy = dist.entropy()  # Optional: can be used for exploration bonus
 
-        return values, logprobs #, dist_entropy
+        return values, logprobs, dist_entropy

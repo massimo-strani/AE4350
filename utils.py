@@ -3,66 +3,45 @@ import matplotlib.animation as animation
 
 import numpy as np
 
-EARTH_RADIUS = 6371 # [km]
+def plot_nominal_orbits(env, show: bool = False, save_path: str = None):
+    fig, ax = plt.subplots(figsize=(6,6))
 
-def rescale_plot(axes: plt.Axes):
-    x_lim = axes.get_xlim()
-    y_lim = axes.get_ylim()
-    z_lim = axes.get_zlim()
+    th_TCA = [env.sat_th_TCA, env.obj_th_TCA]
 
-    x_mid = np.mean(x_lim)
-    y_mid = np.mean(y_lim)
-    z_mid = np.mean(z_lim)
+    th = np.linspace(0, 2 * np.pi, 100)
+    for i, orbital_elements in enumerate([env.sat_elements, env.obj_elements]):
+        sma = orbital_elements['sma']
+        ecc = orbital_elements['ecc']
+        aop = orbital_elements['aop']
 
-    radius = 0.5 * max([x_lim[1] - x_lim[0], y_lim[1] - y_lim[0], z_lim[1] - z_lim[0]])
+        r = sma * (1 - ecc ** 2) / (1 + ecc * np.cos(th))
 
-    axes.set_xlim(x_mid - radius, x_mid + radius)
-    axes.set_ylim(y_mid - radius, y_mid + radius)
-    axes.set_zlim(z_mid - radius, z_mid + radius)
+        r_vec = r * np.array([np.cos(th), np.sin(th)])
+        r_vec = np.array([[np.cos(aop), -np.sin(aop)],
+                      [np.sin(aop),  np.cos(aop)]]) @ r_vec
 
-    axes.set_box_aspect([1, 1, 1])  # Equal aspect ratio
+        # plot orbit
+        ax.plot(r_vec[0], r_vec[1], '--', label=['Satellite', 'Debris'][i], color=['tab:blue', 'tab:red'][i])
 
-def plot_earth(axes: plt.Axes):
-    # Create a sphere to represent the Earth
-    u = np.linspace(0, 2 * np.pi, 100)
-    v = np.linspace(0, np.pi, 100)
+        # compute initial position and position at TCA
+        th_0 = env._propagate_body_to_epoch(sma, ecc, th_TCA[i], -env.TCA)
+        r_0, _ = env._keplerian2cartesian(sma, ecc, aop, th_0)
+        r_TCA, _ = env._keplerian2cartesian(sma, ecc, aop, th_TCA[i])
 
-    x = EARTH_RADIUS * np.outer(np.cos(u), np.sin(v))
-    y = EARTH_RADIUS * np.outer(np.sin(u), np.sin(v))
-    z = EARTH_RADIUS * np.outer(np.ones(np.size(u)), np.cos(v))
+        # plot initial position and position at TCA
+        ax.plot(*r_0, 'o', label=['Satellite Start', 'Debris Start'][i], color=['tab:blue', 'tab:red'][i])
+        ax.plot(*r_TCA, '^', label=['Satellite TCA', 'Debris TCA'][i], color=['tab:blue', 'tab:red'][i])
 
-    # Plot the surface of the Earth
-    axes.plot_surface(x, y, z, color='b', alpha=0.3)
+    ax.set_xlabel('X [km]')
+    ax.set_ylabel('Y [km]')
+    ax.set_aspect('equal', 'box')
+    ax.legend(loc='upper right')
+    ax.grid()
 
+    if show:
+        plt.show()
 
-def visualize_episode(state_history: np.ndarray, save_path: str = 'plots/episode.mp4'):
-    primary_state = state_history[:, 1:4]
-    debris_state = state_history[:, 7:10]
-
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_subplot(111, projection='3d')
-
-    plot_earth(ax)
-
-    trajectories = [
-        ax.plot([], [], [], '-', label='Satellite')[0],
-        ax.plot([], [], [], '-', label='Debris')[0]
-    ]
-
-    ax.figure.canvas.draw()
-    # background = ax.figure.canvas.copy_from_bbox(ax.bbox)
-
-    # Restore the background
-    # ax.figure.canvas.restore_region(background)
-
-    def update(frame):
-        # Update the data for each trajectory
-        for traj, state in zip(trajectories, [primary_state, debris_state]):
-            traj.set_data(state[:frame, 0], state[:frame, 1])
-            traj.set_3d_properties(state[:frame, 2])
-
-        return trajectories
-
-    ani = animation.FuncAnimation(fig, update, frames=len(state_history), interval=1, blit=True, repeat=False)
-    ani.save(save_path, writer='ffmpeg', fps=30)
+    if save_path:
+        plt.savefig(save_path)
+        plt.close()
    
