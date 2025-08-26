@@ -1,11 +1,12 @@
-import matplotlib.pyplot as plt
-
 from gymnasium.spaces import Box
 
 import numpy as np
 import scipy
+import yaml
+import torch
 
 from utils import *
+from PPO import PPO
 
 RANDOM_SEED = 42
 
@@ -120,9 +121,6 @@ class Environment:
         obj_r_TCA = sat_r_TCA + r_offset # (2,)
         obj_v_TCA = sat_v_TCA + v_offset # (2,)
 
-        r = np.linalg.norm(obj_r_TCA)
-        v = np.linalg.norm(obj_v_TCA)
-
         # initialize satellite and debris orbital elements
         self.sat_elements = self.nominal_orbit.copy()
         self.obj_elements = self._cartesian2keplerian(obj_r_TCA, obj_v_TCA)
@@ -135,6 +133,7 @@ class Environment:
         self.obj_elements['th'] = ths[1]
 
         # Reset training variables
+        self.state_history = [self.sat_elements.copy()]
         self.cumsum_deltaV = 0
         self.epoch = 0
         self.done = False
@@ -147,7 +146,8 @@ class Environment:
           action: np.ndarray of shape (2,) representing the impulsive maneuver in km/s.
         '''
 
-        action = np.clip(action, self.action_space.low, self.action_space.high)
+        # action is rescaled to match dimensions [km/s]
+        action = self.action_space.low + .5 * (self.action_space.high - self.action_space.low) * (action + 1)
 
         COLLISION_THRESHOLD = 1 # [km]
         DELTAV_THRESHOLD = 0.02 # [km/s]
@@ -162,7 +162,6 @@ class Environment:
         # apply deltaV and recompute satellite's orbit
         sat_r, sat_v = self._keplerian2cartesian(**self.sat_elements)
         sat_v += action
-
         self.sat_elements = self._cartesian2keplerian(sat_r, sat_v)
 
         # propagate satellite and debris states one epoch forward
@@ -170,52 +169,58 @@ class Environment:
         self.sat_elements['th'] = ths[0]
         self.obj_elements['th'] = ths[1]
 
+        # store state in the history
+        self.state_history.append(self.sat_elements.copy())
+
         # get observation and update info
         obs = self.get_observation()
         self.epoch += time_step
 
         info_dict = {
             'termination reason': None,
-            'propagated distance': None,
-            'miss distance': None,
+            'relative distance': None,
+            'orbital elements': self.sat_elements,
             'action': action,
             'cumulative deltaV': self.cumsum_deltaV,
             'epoch': self.epoch
         }
 
-        # CHECK FUEL CONDITION
-        if self.cumsum_deltaV > DELTAV_THRESHOLD:
-            reward -= 1000 # large penalty for violating fuel constraint
-            self.done = True
-
-            info_dict['termination reason'] = 'DeltaV threshold violated'
-            return obs, reward, self.done, info_dict
-
         # CHECK COLLISION CONDITION
         relative_distance = np.linalg.norm(obs[4:6])
+        info_dict['relative distance'] = relative_distance
+
         if relative_distance < COLLISION_THRESHOLD:
             # large penalty for collision
-            reward -= 1000 
+            reward -= 100
             self.done = True
 
             info_dict['termination reason'] = 'Collision detected'
             return obs, reward, self.done, info_dict
 
-        elif self.epoch > self.TCA and relative_distance > COLLISION_THRESHOLD:
-            # positive reward for missing the debris
-            reward += 100
+        # ORBIT DIVERGENCE REWARD
+        delta_sma = np.abs(self.sat_elements['sma'] - self.nominal_orbit['sma']) / self.nominal_orbit['sma']
+        delta_ecc = np.abs(self.sat_elements['ecc'] - self.nominal_orbit['ecc']) / (self.nominal_orbit['ecc'] + 1e-8)
+        delta_aop = np.abs(self.sat_elements['aop'] - self.nominal_orbit['aop']) / np.pi
+
+        reward -= (delta_sma + delta_ecc + delta_aop)
+
+        # DeltaV REWARD
+        reward -= 5 * deltaV / DELTAV_THRESHOLD
+
+        if self.epoch > self.TCA:
+            reward += 1 # small positive reward for missing the debris
             self.done = True
 
             info_dict['termination reason'] = 'CAM successful'
+
             return obs, reward, self.done, info_dict
 
         # MISS DISTANCE REWARD
         # propagate the two orbits to TCA to compute miss distance
-        time_array = np.arange(self.epoch, self.TCA, time_step)
         ths = [self.sat_elements['th'], self.obj_elements['th']]
-        
-        propagated_distance = np.zeros_like(time_array)
-        for i, t in enumerate(time_array):
+
+        propagated_distance = np.zeros(int((self.TCA - self.epoch) / time_step) + 1)
+        for i in range(propagated_distance.shape[0]):
             ths = self._propagate_system_to_epoch(*ths, time_step)
 
             sat_r, _ = self._keplerian2cartesian(self.sat_elements['sma'], self.sat_elements['ecc'], self.sat_elements['aop'], ths[0])
@@ -224,23 +229,10 @@ class Environment:
             propagated_distance[i] = np.linalg.norm(sat_r - obj_r)
 
         miss_distance = np.min(propagated_distance)
-        info_dict['miss distance'] = miss_distance
 
         # compute reward
         if miss_distance < COLLISION_THRESHOLD:
-            reward -= 100 * (COLLISION_THRESHOLD - miss_distance)
-        else:
-            reward += 5 * (miss_distance / COLLISION_THRESHOLD)
-
-        # ORBIT DIVERGENCE REWARD
-        delta_sma = np.abs(self.sat_elements['sma'] - self.nominal_orbit['sma']) / self.nominal_orbit['sma']
-        delta_ecc = np.abs(self.sat_elements['ecc'] - self.nominal_orbit['ecc']) / (self.nominal_orbit['ecc'] + 1e-8)
-        delta_aop = np.abs((self.sat_elements['aop'] - self.nominal_orbit['aop']) % (2 * np.pi)) / (2 * np.pi)
-
-        reward -= delta_sma + delta_ecc + delta_aop
-
-        # DeltaV REWARD
-        reward -= 10 * deltaV 
+            reward -= (COLLISION_THRESHOLD - miss_distance) / COLLISION_THRESHOLD
 
         return obs, reward, self.done, info_dict
 
@@ -248,22 +240,26 @@ class Environment:
 if __name__ == '__main__':
     env = Environment()
 
-    for i in range(3):
-        obs = env.reset()
+    observation = env.reset()
+    plot_nominal_orbits(env, show=True)
 
-        print('TCA : ', env.TCA)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        plot_nominal_orbits(env, show=True)
+    with open('config.yaml', 'r') as file:
+        hyperparameters = yaml.safe_load(file)
 
-        action = np.random.uniform(-0.01,0.01,(2,))
-        _, reward, _, info = env.step(action)
+    obs_dim = env.observation_space.shape[0]
+    act_dim = env.action_space.shape[0]
 
-        # print(info['termination reason'])
-        print('miss distance : ', info['miss distance'])
-        # print('delta V : ', info['action'])
-        # print('reward : ', reward)
+    ppo_agent = PPO(obs_dim, act_dim, device=device, **hyperparameters)
 
+    done = False
+    while not done:
+        action = ppo_agent.get_action(observation)
+        print('sample action : ', action)
 
-# TODO:
-# - Add termination conditions if relative position is below a certain threshold
-# - Figure out a way to re-propagate the orbit with different initial conditions (agent knows full state history a-priori and can choose at what epoch to perform an impulsive-maneuver. If a CAM is performed, the new initial state have to be computed and the orbit must be re-propagated.).
+        observation, reward, done, info = env.step(action)
+        print('reward : ', reward)
+        print('relative distance : ', info['relative distance'])
+
+    print('Termination reason: ', info['termination reason'])

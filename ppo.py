@@ -80,7 +80,7 @@ class PPO:
         rewards_to_go = torch.FloatTensor(rewards_to_go).to(self.device)
 
         # Normalize rewards_to_go here before computing advantages
-        # rewards_to_go = (rewards_to_go - rewards_to_go.mean()) / (rewards_to_go.std() + 1e-10)  # normalize
+        rewards_to_go = (rewards_to_go - rewards_to_go.mean()) / (rewards_to_go.std() + 1e-10)  # normalize
 
         # Convert list of tensors (from buffer) to a single tensor
         batch_obss = torch.squeeze(torch.stack(self.buffer.obss), dim=0).to(self.device)

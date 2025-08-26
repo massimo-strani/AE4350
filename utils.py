@@ -9,7 +9,7 @@ def plot_nominal_orbits(env, show: bool = False, save_path: str = None):
     th_TCA = [env.sat_th_TCA, env.obj_th_TCA]
 
     th = np.linspace(0, 2 * np.pi, 100)
-    for i, orbital_elements in enumerate([env.sat_elements, env.obj_elements]):
+    for i, orbital_elements in enumerate([env.nominal_orbit, env.obj_elements]):
         sma = orbital_elements['sma']
         ecc = orbital_elements['ecc']
         aop = orbital_elements['aop']
@@ -21,7 +21,7 @@ def plot_nominal_orbits(env, show: bool = False, save_path: str = None):
                       [np.sin(aop),  np.cos(aop)]]) @ r_vec
 
         # plot orbit
-        ax.plot(r_vec[0], r_vec[1], '--', label=['Satellite', 'Debris'][i], color=['tab:blue', 'tab:red'][i])
+        ax.plot(r_vec[0], r_vec[1], '--', label=['Satellite Orbit', 'Debris Orbit'][i], color=['tab:blue', 'tab:red'][i])
 
         # compute initial position and position at TCA
         th_0 = env._propagate_body_to_epoch(sma, ecc, th_TCA[i], -env.TCA)
@@ -29,19 +29,46 @@ def plot_nominal_orbits(env, show: bool = False, save_path: str = None):
         r_TCA, _ = env._keplerian2cartesian(sma, ecc, aop, th_TCA[i])
 
         # plot initial position and position at TCA
-        ax.plot(*r_0, 'o', label=['Satellite Start', 'Debris Start'][i], color=['tab:blue', 'tab:red'][i])
-        ax.plot(*r_TCA, '^', label=['Satellite TCA', 'Debris TCA'][i], color=['tab:blue', 'tab:red'][i])
+        ax.plot(*r_0, 'o', label=['Satellite @ t$_0$', 'Debris @ t$_0$'][i], color=['tab:blue', 'tab:red'][i])
+        ax.plot(*r_TCA, '^', label=['Satellite @ TCA', 'Debris @ TCA'][i], color=['tab:blue', 'tab:red'][i])
 
+    ax.set_title('TCA : {:.1f} min'.format(env.TCA / 60))
     ax.set_xlabel('X [km]')
     ax.set_ylabel('Y [km]')
     ax.set_aspect('equal', 'box')
-    ax.legend(loc='upper right')
+    ax.legend(loc='upper right', ncol=2)
     ax.grid()
 
     if show:
         plt.show()
 
     if save_path:
-        plt.savefig(save_path)
+        fig.savefig(save_path)
         plt.close()
+
+    return fig, ax
+
+def plot_log(log_path: str, show: bool = False, save_path: str = None):
+    data = np.loadtxt(log_path, delimiter=',', skiprows=1)
+    episodes = data[:,0]
+    # timesteps = data[:,1]
+    rewards = data[:,2]
+
+    fig, ax = plt.subplots(figsize=(6,6))
+
+    ax.plot(episodes, rewards)
+    ax.set_ylabel('Average Reward per Episode')
+    ax.set_xlabel('Episodes')
+    ax.grid()
+
+    plt.tight_layout()
+
+    if show:
+        plt.show()
+
+    if save_path:
+        fig.savefig(save_path)
+        plt.close()
+
+    return fig, ax
    

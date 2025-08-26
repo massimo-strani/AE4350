@@ -1,6 +1,6 @@
-orekit python wrapper via conda (install orekit data as well)
 gymnasium
 numpy
+scipy
 matplotlib
 torch
 yaml

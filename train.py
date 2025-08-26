@@ -7,7 +7,8 @@ from datetime import datetime
 from Environment import Environment
 from PPO import PPO
 
-def train(env: Environment, hyperparameters: dict, log_path: str, ckpt_path: str):
+def train(env: Environment, hyperparameters: dict, log_path: str, ckpt_path: str, device: torch.device = torch.device('cpu')):
+    # logging and printing frequency
     log_frequency = hyperparameters['timesteps_per_episode'] * 2
     print_frequency = hyperparameters['timesteps_per_episode'] * 4
 
@@ -24,7 +25,16 @@ def train(env: Environment, hyperparameters: dict, log_path: str, ckpt_path: str
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
 
-    ppo_agent = PPO(obs_dim, act_dim, **hyperparameters)
+    ppo_agent = PPO(obs_dim, act_dim, device=device, **hyperparameters)
+
+    # convergence criteria
+    window_rewards = []
+    window_size = 50
+    mean_reward = None
+    convergence_threshold = 0.02
+    std_threshold = 2500
+    converged_windows = 0
+    required_converged_windows = 5
 
     # tracking time
     start_time = datetime.now().replace(microsecond=0)
@@ -57,7 +67,7 @@ def train(env: Environment, hyperparameters: dict, log_path: str, ckpt_path: str
 
             # update PPO agent
             if time_step % hyperparameters['timesteps_per_batch'] == 0:
-                loss = ppo_agent.update()
+                ppo_agent.update()
 
             # log
             if time_step % log_frequency == 0:
@@ -70,7 +80,7 @@ def train(env: Environment, hyperparameters: dict, log_path: str, ckpt_path: str
 
             # print
             if time_step % print_frequency == 0:
-                print_avg_reward = print_reward
+                print_avg_reward = print_reward / print_episodes
                 print('Episode: {}, Timestep: {}, Reward: {}'.format(i_episode, time_step, print_avg_reward))
 
                 print_reward = 0
@@ -94,17 +104,37 @@ def train(env: Environment, hyperparameters: dict, log_path: str, ckpt_path: str
         print_reward += episode_reward
         print_episodes += 1
 
+        # check for convergence
+        window_rewards.append(episode_reward)
+        if len(window_rewards) > window_size:
+            window_rewards.pop(0)
+
+        if len(window_rewards) == window_size:
+            window_avg = np.mean(window_rewards)
+            window_std = np.std(window_rewards)
+
+            if mean_reward is not None:
+                relative_change = np.abs(window_avg - mean_reward) / (np.abs(mean_reward) + 1e-8)
+
+                if relative_change < convergence_threshold and window_std < std_threshold:
+                    converged_windows += 1
+                else:
+                    converged_windows = 0
+
+                if converged_windows >= required_converged_windows:
+                    print('Convergence achieved at episode {}, timestep {}!'.format(i_episode, time_step))
+                    print('Final average reward: {:.2f} ± {:.2f}'.format(window_avg, window_std))
+                    print('Total training time: ', datetime.now().replace(microsecond=0) - start_time)
+                    break
+            
+            mean_reward = window_avg
+
     log_f.close()
-    env.close()
 
 
 if __name__ == '__main__':
     # This can speed up training if you have a GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    # Load configuration
-    with open('config.yaml', 'r') as file:
-        config = yaml.safe_load(file)
 
     # ENVIRONMENT
     env = Environment()
@@ -120,7 +150,7 @@ if __name__ == '__main__':
     print('logging at : ' + log_path)
 
     # CHECKPOINTING
-    ckpt_dir = 'preTrained'
+    ckpt_dir = 'models'
     if not os.path.exists(ckpt_dir):
         os.makedirs(ckpt_dir)
 
@@ -129,6 +159,8 @@ if __name__ == '__main__':
     print('save checkpoint path : ' + ckpt_path)
 
     # TRAINING LOOP
-    # load hyperparameters
-    hyperparameters = config['benchmark']
-    train(env, hyperparameters, log_path, ckpt_path)
+    # Load hyperparameters
+    with open('config.yaml', 'r') as file:
+        hyperparameters = yaml.safe_load(file)
+
+    train(env, hyperparameters, log_path, ckpt_path, device=device)
