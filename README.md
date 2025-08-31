@@ -1,4 +1,4 @@
-# Reinforcement Learning for Satellite Collision Avoidance using PPO
+# AE4350 Bio-Inspired Intelligence and Learning for Aerospace Applications: Satellite CAM and Return to Orbit via PPO-Clip
 
 ## Overview
 This project explores the use of **Proximal Policy Optimization (PPO)** for collision avoidance maneuvers (CAM) in Low Earth Orbit (LEO) while minimizing both **delta-V** and orbital deviations. The environment is highly simplified, representing a **2D Keplerian orbit without perturbations** and a single debris object. The PPO implementation is minimal, serving as a baseline for reinforcement learning in this context.
