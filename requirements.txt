@@ -1,8 +1,7 @@
-gymnasium
-numpy
-scipy
-matplotlib
-torch
-yaml
-os
-datetime
+gymnasium==0.29.1
+numpy==1.26.4
+scipy==1.12.0
+matplotlib==3.8.3
+torch==2.2.1
+PyYAML==6.0.1
+pandas==2.2.1

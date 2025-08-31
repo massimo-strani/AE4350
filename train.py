@@ -28,13 +28,13 @@ def train(env: Environment, hyperparameters: dict, log_path: str, ckpt_path: str
     ppo_agent = PPO(obs_dim, act_dim, device=device, **hyperparameters)
 
     # convergence criteria
-    window_rewards = []
-    window_size = 50
-    mean_reward = None
-    convergence_threshold = 0.02
-    std_threshold = 2500
-    converged_windows = 0
-    required_converged_windows = 5
+    # window_rewards = []
+    # window_size = 50
+    # mean_reward = None
+    # convergence_threshold = 0.02
+    # std_threshold = 2500
+    # converged_windows = 0
+    # required_converged_windows = 5
 
     # tracking time
     start_time = datetime.now().replace(microsecond=0)
@@ -105,29 +105,29 @@ def train(env: Environment, hyperparameters: dict, log_path: str, ckpt_path: str
         print_episodes += 1
 
         # check for convergence
-        window_rewards.append(episode_reward)
-        if len(window_rewards) > window_size:
-            window_rewards.pop(0)
+        # window_rewards.append(episode_reward)
+        # if len(window_rewards) > window_size:
+        #     window_rewards.pop(0)
 
-        if len(window_rewards) == window_size:
-            window_avg = np.mean(window_rewards)
-            window_std = np.std(window_rewards)
+        # if len(window_rewards) == window_size:
+        #     window_avg = np.mean(window_rewards)
+        #     window_std = np.std(window_rewards)
 
-            if mean_reward is not None:
-                relative_change = np.abs(window_avg - mean_reward) / (np.abs(mean_reward) + 1e-8)
+        #     if mean_reward is not None:
+        #         relative_change = np.abs(window_avg - mean_reward) / (np.abs(mean_reward) + 1e-8)
 
-                if relative_change < convergence_threshold and window_std < std_threshold:
-                    converged_windows += 1
-                else:
-                    converged_windows = 0
+        #         if relative_change < convergence_threshold and window_std < std_threshold:
+        #             converged_windows += 1
+        #         else:
+        #             converged_windows = 0
 
-                if converged_windows >= required_converged_windows:
-                    print('Convergence achieved at episode {}, timestep {}!'.format(i_episode, time_step))
-                    print('Final average reward: {:.2f} ± {:.2f}'.format(window_avg, window_std))
-                    print('Total training time: ', datetime.now().replace(microsecond=0) - start_time)
-                    break
+        #         if converged_windows >= required_converged_windows:
+        #             print('Convergence achieved at episode {}, timestep {}!'.format(i_episode, time_step))
+        #             print('Final average reward: {:.2f} ± {:.2f}'.format(window_avg, window_std))
+        #             print('Total training time: ', datetime.now().replace(microsecond=0) - start_time)
+        #             break
             
-            mean_reward = window_avg
+        #     mean_reward = window_avg
 
     log_f.close()
 
@@ -146,7 +146,7 @@ if __name__ == '__main__':
         os.makedirs(log_dir)
 
     # create log file (overwrites previous logs)
-    log_path = log_dir + '/test.csv'
+    log_path = log_dir + '/baseline.csv'
     print('logging at : ' + log_path)
 
     # CHECKPOINTING
@@ -155,7 +155,7 @@ if __name__ == '__main__':
         os.makedirs(ckpt_dir)
 
     # create checkpoint path (overwrites previous checkpoints)
-    ckpt_path = ckpt_dir + '/ppo_test.pth'
+    ckpt_path = ckpt_dir + '/baseline.pth'
     print('save checkpoint path : ' + ckpt_path)
 
     # TRAINING LOOP

@@ -1,4 +1,7 @@
 __pycache__/*
+logs/
+models/
+plots/
 *.pth
 *.pdf
 *.csv

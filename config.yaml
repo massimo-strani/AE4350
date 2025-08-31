@@ -1,10 +1,11 @@
-total_timesteps: 5.0e+6
+total_timesteps: 300000
 timesteps_per_episode: 1000
-timesteps_per_batch: 2000   # this one
+timesteps_per_batch: 2000   
+layers: [64, 64]            
 save_frequency: 20000
-standard_deviation: 0.5     # this one
-discount_factor: 0.99       # this one
+standard_deviation: 0.1     
+discount_factor: 0.99       
 clip_ratio: 0.2
-updates_per_iteration: 5    # this one
-lr_actor: 0.0003            # this one
-lr_critic: 0.001            # this one
+updates_per_iteration: 5    
+lr_actor: 0.0003            
+lr_critic: 0.001            

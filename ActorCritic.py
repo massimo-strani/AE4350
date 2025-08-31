@@ -6,7 +6,7 @@ from torch.distributions import MultivariateNormal
 import numpy as np
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, std: float, device: torch.device = torch.device('cpu')):
+    def __init__(self, obs_dim: int, act_dim: int, std: float, layers: list[int], device: torch.device = torch.device('cpu')):
         super(ActorCritic, self).__init__()
 
         # Standard deviation for the action distribution is fixed for simplicity
@@ -15,26 +15,28 @@ class ActorCritic(nn.Module):
         self.act_mat = torch.diag(self.act_var).to(device)                    # Covariance matrix for the action distribution
 
         self.act_dim = act_dim
-        self.actor = nn.Sequential(
-            nn.Linear(obs_dim, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, act_dim),
-            nn.Tanh()  # Output layer for actions
-          )
         
-        self.critic = nn.Sequential(
-            nn.Linear(obs_dim, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, 1)  # Output layer for value function
-          )
+        self.actor = self._build_mlp(obs_dim, act_dim, layers, output_activation=nn.Tanh())
+        self.critic = self._build_mlp(obs_dim, 1, layers, output_activation=None)
+
 
     def forward(self):
         raise NotImplementedError
     
+    def _build_mlp(self, input_dim: int, output_dim: int, layer_sizes: list[int], output_activation: nn.Module = None):
+        layers = []
+        prev_dim = input_dim
+        
+        for size in layer_sizes:
+            layers.append(nn.Linear(prev_dim, size))
+            layers.append(nn.Tanh())
+            prev_dim = size
+        
+        layers.append(nn.Linear(prev_dim, output_dim))
+        if output_activation:
+            layers.append(output_activation)
+
+        return nn.Sequential(*layers)
 
     def act(self, obs: torch.Tensor):
         ''' Returns an action and its log probability based on the current observation. '''

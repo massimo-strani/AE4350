@@ -20,6 +20,7 @@ NOMINAL_ORBIT = {
 class Environment:
     def __init__(self, nominal_orbit: dict = NOMINAL_ORBIT, seed: int = RANDOM_SEED):
         np.random.seed(RANDOM_SEED)
+        torch.manual_seed(RANDOM_SEED)
         
         self.observation_space = Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
         self.action_space = Box(low=-0.01, high=0.01, shape=(2,), dtype=np.float32)
@@ -240,26 +241,6 @@ class Environment:
 if __name__ == '__main__':
     env = Environment()
 
-    observation = env.reset()
-    plot_nominal_orbits(env, show=True)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    with open('config.yaml', 'r') as file:
-        hyperparameters = yaml.safe_load(file)
-
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
-
-    ppo_agent = PPO(obs_dim, act_dim, device=device, **hyperparameters)
-
-    done = False
-    while not done:
-        action = ppo_agent.get_action(observation)
-        print('sample action : ', action)
-
-        observation, reward, done, info = env.step(action)
-        print('reward : ', reward)
-        print('relative distance : ', info['relative distance'])
-
-    print('Termination reason: ', info['termination reason'])
+    for i in range(5):
+        observation = env.reset()
+        plot_nominal_orbits(env, show=True, save=f'plots/nominal_orbits_{i}.pdf')

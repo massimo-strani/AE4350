@@ -34,14 +34,15 @@ class PPO:
         self.obs_dim = obs_dim
         self.act_dim = act_dim
 
+        # Hyperparameters
+        self.layers = kwargs.get('layers', [64, 64])  # Hidden layers for actor and critic networks
         self.gamma = kwargs.get('discount_factor', 0.99)  # Discount factor
         self.updates_per_iteration = kwargs.get('updates_per_iteration', 5)  # Number of updates per iteration
         self.clip = kwargs.get('clip_ratio', 0.2)  # Clipping parameter for PPO
-
-        self.std = kwargs.get('standard_deviation', 0.5)  # Standard deviation for action distribution
+        self.std = kwargs.get('standard_deviation', 0.1)  # Standard deviation for action distribution
 
         # Initialize actor-critic network
-        self.policy = ActorCritic(self.obs_dim, self.act_dim, self.std, device=device).to(device)
+        self.policy = ActorCritic(self.obs_dim, self.act_dim, self.std, self.layers, device=device).to(device)
         self.buffer = RolloutBuffer()
 
         self.optimizer = torch.optim.Adam([
@@ -80,7 +81,7 @@ class PPO:
         rewards_to_go = torch.FloatTensor(rewards_to_go).to(self.device)
 
         # Normalize rewards_to_go here before computing advantages
-        rewards_to_go = (rewards_to_go - rewards_to_go.mean()) / (rewards_to_go.std() + 1e-10)  # normalize
+        # rewards_to_go = (rewards_to_go - rewards_to_go.mean()) / (rewards_to_go.std() + 1e-10)  # normalize
 
         # Convert list of tensors (from buffer) to a single tensor
         batch_obss = torch.squeeze(torch.stack(self.buffer.obss), dim=0).to(self.device)
